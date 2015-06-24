@@ -116,6 +116,28 @@ inline Thread_State::Thread_State() :
 		shared(Random::integer(0, State::s - 1)), local(Random::integer(0, State::l - 1)) {
 }
 
+/**
+ * @brief determine if (src, dst) correpsonds to a spawn transition
+ * @param src
+ * @param dst
+ * @param spawn_trans
+ * @return bool
+ * 			true : src +> dst
+ * 			false: otherwise
+ */
+bool is_spawn_transition(const Thread_State& src, const Thread_State& dst,
+		const map<Thread_State, set<Thread_State> >& spawn_adj_list) {
+	map<Thread_State, set<Thread_State> >::const_iterator ifind = spawn_adj_list.find(src);
+	if (ifind == spawn_adj_list.end()) {
+		return false;
+	} else {
+		if (ifind->second.find(dst) == ifind->second.end())
+			return false;
+		else
+			return true;
+	}
+}
+
 void print(const map<Thread_State, set<Thread_State> >& adjacency_list, ostream& out = cout) {
 	out << State::s << " " << State::l << endl;
 	for (map<Thread_State, set<Thread_State> >::const_iterator pair = adjacency_list.begin(), end =
@@ -123,8 +145,26 @@ void print(const map<Thread_State, set<Thread_State> >& adjacency_list, ostream&
 		const Thread_State& t = pair->first;
 		const Set<Thread_State>& successors = pair->second;
 		__SAFE_ASSERT__ (! successors.empty());
-		for (Set<Thread_State>::const_iterator succ = successors.begin(), end = successors.end(); succ != end; ++succ)
+		for (Set<Thread_State>::const_iterator succ = successors.begin(), end = successors.end(); succ != end; ++succ) {
 			out << t << " -> " << (*succ) << endl;
+		}
+	}
+}
+
+void print(const map<Thread_State, set<Thread_State> >& adjacency_list,
+		const map<Thread_State, set<Thread_State> >& spawn_adj_list, ostream& out = cout) {
+	out << State::s << " " << State::l << endl;
+	for (map<Thread_State, set<Thread_State> >::const_iterator pair = adjacency_list.begin(), end =
+			adjacency_list.end(); pair != end; ++pair) {
+		const Thread_State& t = pair->first;
+		const Set<Thread_State>& successors = pair->second;
+		__SAFE_ASSERT__ (! successors.empty());
+		for (Set<Thread_State>::const_iterator succ = successors.begin(), end = successors.end(); succ != end; ++succ) {
+			if (is_spawn_transition(t, *succ, spawn_adj_list))
+				out << t << " +> " << (*succ) << endl;
+			else
+				out << t << " -> " << (*succ) << endl;
+		}
 	}
 }
 
@@ -174,6 +214,7 @@ int main(const int argc, const char * const * const argv) {
 			I.print_command_line(0);
 
 		map<Thread_State, set<Thread_State> > adjacency_list;
+		map<Thread_State, set<Thread_State> > spawn_adj_list;
 
 		const string filename = I.arg_value("-f");
 		const ushort init_shared = I.arg2long("-init-shared");
@@ -221,14 +262,19 @@ int main(const int argc, const char * const * const argv) {
 			string sep;
 			while (in) {
 				in >> s1 >> l1 >> sep >> s2 >> l2;
-				__SAFE_ASSERT__ (sep == "->");
-				adjacency_list[Thread_State(s1, l1)].insert(Thread_State(s2, l2));
+				if (sep == "->" || sep == "+>") {
+					adjacency_list[Thread_State(s1, l1)].insert(Thread_State(s2, l2));
+					if (sep == "+>")
+						spawn_adj_list[Thread_State(s1, l1)].insert(Thread_State(s2, l2));
+				} else {
+					throw CONTROL::Error("no such transition: " + sep);
+				}
 			}
 		}
 
 		if (I.arg2bool("-adj-list") || all) {
 			cout << "Adjacency list:" << endl;
-			print(adjacency_list);
+			print(adjacency_list, spawn_adj_list);
 		}
 
 		culong N = State::s * LOGARITHM::power(culong(State::l), State::n); // number of global states: l^n
@@ -237,7 +283,6 @@ int main(const int argc, const char * const * const argv) {
 
 		Thread_State thread_init(init_shared, init_local);
 		State init(thread_init);
-		// cout << "Initial state: " << init << endl;
 
 		set<State> reached; //reachable states set
 		queue<set<State>::const_iterator> unexpanded; //what's this?
@@ -258,16 +303,19 @@ int main(const int argc, const char * const * const argv) {
 			}
 
 			cushort& shared = g.shared;
-			for (ushort i = 0; i < State::n; ++i) {
-				const Thread_State t(shared, g.locals[i]);
-				if (adjacency_list.find(t) != adjacency_list.end()) {
-					const set<Thread_State>& successors = adjacency_list[t];
-					for (set<Thread_State>::const_iterator t_ssucc = successors.begin(), end = successors.end();
-							t_ssucc != end; ++t_ssucc) {
-						const Thread_State& t_succ = *t_ssucc;
+			for (ushort i = 0; i < g.locals.size(); ++i) {
+				const Thread_State src(shared, g.locals[i]);
+				if (adjacency_list.find(src) != adjacency_list.end()) {
+					const set<Thread_State>& successors = adjacency_list[src];
+					for (set<Thread_State>::const_iterator idst = successors.begin(), end = successors.end();
+							idst != end; ++idst) {
+						const Thread_State& dst = *idst;
 						State succ = g;
-						succ.shared = t_succ.shared;
-						succ.locals[i] = t_succ.local;
+						succ.shared = dst.shared;
+						if (is_spawn_transition(src, dst, spawn_adj_list))
+							succ.locals.push_back(dst.local); // if src +> dst
+						else
+							succ.locals[i] = dst.local; 	  // if src -> dst
 						sort(succ.locals.begin(), succ.locals.end()); // symmetry reduction
 						succ.depth = g_depth + 1;
 						pair<set<State>::const_iterator, bool> pair = reached.insert(succ);
@@ -294,7 +342,7 @@ int main(const int argc, const char * const * const argv) {
 					ushort shared = g.shared;
 					Thread_State_Combo c(shared, Set<ushort>(" "));
 					Set<ushort>& combo_set = c.second;
-					for (ushort i = 0; i < State::n; ++i) {
+					for (ushort i = 0; i < g.locals.size(); ++i) {
 						cushort& local = g.locals[i];
 						const Thread_State t(shared, local);
 						pair<Thread_State, ushort> p(t, d);
@@ -308,6 +356,7 @@ int main(const int argc, const char * const * const argv) {
 
 		cout << endl;
 
+		/// output reachable thread state combinations
 		cout << PPRINT::plural(reached_thread_state_combos.size(), "thread state combo") << " reached (out of " << C
 				<< " conceivable)" << (combos ? ":" : "") << endl;
 		for (ushort d = 0; d <= current_depth; ++d) {
@@ -323,9 +372,9 @@ int main(const int argc, const char * const * const argv) {
 			if (combos && !depth_found)
 				cout << "    (depth = " << setw(3) << d << ")" << endl;
 		}
-
 		cout << endl;
 
+		/// output reachable thread state combinations
 		cout << PPRINT::plural(reached_thread_states.size(), "thread state") << " reached (out of " << T
 				<< " conceivable)" << (threads ? ":" : "") << endl;
 		for (ushort d = 0; d <= current_depth; ++d) {
@@ -340,7 +389,6 @@ int main(const int argc, const char * const * const argv) {
 			if (threads && !depth_found)
 				cout << "    (depth = " << setw(3) << d << ")" << endl;
 		}
-
 		cout << endl;
 
 		// Checking for thread states reachable passively in the future.
